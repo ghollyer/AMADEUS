@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amadeus"
+version = "0.1.0"
+description = "Addressable Microscope And Detector Experiment Unified Scripting"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.2.0",
+    "pyzmq>=25.0",
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio"]
+
+[project.scripts]
+amadeus-server = "client.server:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["client*", "dm_server*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
