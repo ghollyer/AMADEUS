@@ -1,0 +1,115 @@
+Welcome to DigitalMicrograph (GMS 3.60.4435.0).  5/5/2026, 3:39:32 PM
+Connected to Microscope Communication Server.
+Python version = 3.10.19150.1013
+Numpy version = 1.26.0
+Picker '1' on [X:EDS Spectrum Image] 
+	 found valid child image [W:(9) Spectrum of EDS Spectrum Image].
+	 Linkage reestablished.
+
+Spectrum Image acquisition.
+Using HW-sync.
+Begin: 5/5/2026, 3:41:41 PM. 
+End: 5/5/2026, 3:45:48 PM. 
+
+Spectrum Image acquisition.
+Using HW-sync.
+Begin: 5/5/2026, 3:48:20 PM. 
+End: 5/5/2026, 3:53:01 PM. 
+
+
+Field values:
+
+
+Field values:
+ID[  10]: Scan = 1
+ID[  11]: Signal 1 = 1
+ID[  12]: Signal 2 = 0
+
+
+Field values:
+ID[   1]: Capture = 0
+ID[   4]: Pixel Time = 0.02
+ID[   5]: Live Data = 1
+ID[   7]: Drift = 0
+ID[   8]: Sub-scan = 0
+ID[   9]: Passes = 1
+ID[  10]: Scan = 1
+ID[  11]: Signal 1 = 1
+ID[  12]: Signal 2 = 0
+ID[ 101]: 2D Array, X samples = 110
+ID[ 102]: 2D Array, sampling = 1
+ID[ 111]: 2D Array, Y samples = 125
+ID[ 112]: 2D Array, sampling lock = 0
+
+
+Field values:
+ID[   1]: Capture = 0
+ID[   4]: Pixel Time = 0.01
+ID[   5]: Live Data = 1
+ID[   7]: Drift = 0
+ID[   8]: Sub-scan = 0
+ID[   9]: Passes = 1
+ID[  10]: Scan = 1
+ID[  11]: Signal 1 = 1
+ID[  12]: Signal 2 = 0
+ID[ 101]: 2D Array, X samples = 110
+ID[ 102]: 2D Array, sampling = 1
+ID[ 111]: 2D Array, Y samples = 125
+ID[ 112]: 2D Array, sampling lock = 0
+
+
+Field values:
+ID[   1]: Capture = 0
+ID[   4]: Pixel Time = 0.01
+ID[   5]: Live Data = 1
+ID[   7]: Drift = 0
+ID[   8]: Sub-scan = 0
+ID[   9]: Passes = 1
+ID[  10]: Scan = 1
+ID[  11]: Signal 1 = 0
+ID[  12]: Signal 2 = 0
+ID[ 301]: MultiPoint, points = 1
+
+
+Field values:
+ID[   1]: Capture = 0
+ID[   4]: Pixel Time = 0.01
+ID[   5]: Live Data = 1
+ID[   7]: Drift = 0
+ID[   8]: Sub-scan = 0
+ID[   9]: Passes = 1
+ID[  10]: Scan = 1
+ID[  11]: Signal 1 = 0
+ID[  12]: Signal 2 = 0
+ID[ 301]: MultiPoint, points = 4
+
+
+Field values:
+ID[   1]: Capture = 0
+ID[   4]: Pixel Time = 0.01
+ID[   5]: Live Data = 1
+ID[   7]: Drift = 0
+ID[   8]: Sub-scan = 0
+ID[   9]: Passes = 1
+ID[  10]: Scan = 1
+ID[  11]: Signal 1 = 1
+ID[  12]: Signal 2 = 0
+ID[ 201]: LineScan, samples = 178
+ID[ 202]: LineScan, sampling = 3.75181
+ID[ 210]: LineScan, averaging check = 0
+ID[ 213]: LineScan, sampling lock = 0
+
+
+Field values:
+ID[   1]: Capture = 0
+ID[   4]: Pixel Time = 0.01
+ID[   5]: Live Data = 1
+ID[   7]: Drift = 0
+ID[   8]: Sub-scan = 0
+ID[   9]: Passes = 1
+ID[  10]: Scan = 1
+ID[  11]: Signal 1 = 1
+ID[  12]: Signal 2 = 0
+ID[ 401]: TimeSeries, iterations = 10
+ID[ 402]: TimeSeries, delay time = 0
+ID[ 403]: TimeSeries, 2D scan check = 0

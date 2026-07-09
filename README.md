@@ -73,9 +73,10 @@ stage, beam, detectors, camera, spectroscopy
 
 ## Requirements
 
-- Python 3.11 or newer
-- `uv`
-- Access to the microscope-side Python environment for live instrument control
+- Python 3.11 or newer (client)
+- `uv` (client)
+- Python 3.10 or newer (Digitalmicrograph)
+- Network access or ethernet bridge cable to Gatan
 
 ## Install
 
@@ -99,7 +100,7 @@ amadeus-server --dm-address tcp://<VM IP here>:9876 --data-dir ./amadeus_data
 
 ## Run The Microscope-Side Server
 
-From the microscope software Python console, run:
+In Digitalmicrograph, open 'server.py'
 
 ```python
 exec(open(r"C:\path\to\AMADEUS\dm_server\server.py").read())

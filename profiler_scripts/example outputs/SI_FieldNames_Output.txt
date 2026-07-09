@@ -1,0 +1,103 @@
+Active application mode:Select
+Accessible items:
+ID[  10]: Scan
+ID[  11]: Signal 1
+ID[  12]: Signal 2
+ID[  13]: Signal 3
+ID[  14]: Signal 4
+ID[  15]: Signal 5
+ID[ 501]: Select, 2D Array
+ID[ 502]: Select, Line Scan
+ID[ 503]: Select, Time Series
+ID[ 504]: Select, Multi-Point
+
+
+Active application mode:2D Array
+Accessible items:
+ID[   1]: Capture
+ID[   2]: Record
+ID[   4]: Pixel Time
+ID[   5]: Live Data
+ID[   7]: Drift
+ID[   8]: Sub-scan
+ID[   9]: Passes
+ID[  10]: Scan
+ID[  11]: Signal 1
+ID[  12]: Signal 2
+ID[  13]: Signal 3
+ID[  14]: Signal 4
+ID[  15]: Signal 5
+ID[  20]: Home
+ID[ 101]: 2D Array, X samples
+ID[ 102]: 2D Array, sampling
+ID[ 111]: 2D Array, Y samples
+ID[ 112]: 2D Array, sampling lock
+
+
+Active application mode:Multi-Point
+Accessible items:
+ID[   1]: Capture
+ID[   2]: Record
+ID[   4]: Pixel Time
+ID[   5]: Live Data
+ID[   7]: Drift
+ID[   8]: Sub-scan
+ID[   9]: Passes
+ID[  10]: Scan
+ID[  11]: Signal 1
+ID[  12]: Signal 2
+ID[  13]: Signal 3
+ID[  14]: Signal 4
+ID[  15]: Signal 5
+ID[  20]: Home
+ID[ 301]: MultiPoint, points
+ID[ 302]: MultiPoint, randomize points
+ID[ 303]: MultiPoint, grid-arrange points
+ID[ 304]: MultiPoint, grid-randomize points
+
+
+Active application mode:Line Scan
+Accessible items:
+ID[   1]: Capture
+ID[   2]: Record
+ID[   4]: Pixel Time
+ID[   5]: Live Data
+ID[   7]: Drift
+ID[   8]: Sub-scan
+ID[   9]: Passes
+ID[  10]: Scan
+ID[  11]: Signal 1
+ID[  12]: Signal 2
+ID[  13]: Signal 3
+ID[  14]: Signal 4
+ID[  15]: Signal 5
+ID[  20]: Home
+ID[ 201]: LineScan, samples
+ID[ 202]: LineScan, sampling
+ID[ 210]: LineScan, averaging check
+ID[ 211]: LineScan, averaging points
+ID[ 212]: LineScan, averaging angle
+ID[ 213]: LineScan, sampling lock
+
+
+Active application mode:Time Series
+Accessible items:
+ID[   1]: Capture
+ID[   2]: Record
+ID[   4]: Pixel Time
+ID[   5]: Live Data
+ID[   7]: Drift
+ID[   8]: Sub-scan
+ID[   9]: Passes
+ID[  10]: Scan
+ID[  11]: Signal 1
+ID[  12]: Signal 2
+ID[  13]: Signal 3
+ID[  14]: Signal 4
+ID[  15]: Signal 5
+ID[  20]: Home
+ID[ 401]: TimeSeries, iterations
+ID[ 402]: TimeSeries, delay time
+ID[ 403]: TimeSeries, 2D scan check
+ID[ 404]: TimeSeries, 2D scan X points
+ID[ 405]: TimeSeries, 2D scan Y points
