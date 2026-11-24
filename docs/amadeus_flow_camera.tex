@@ -1,0 +1,34 @@
+\def\amadeusoverlay{%
+  % highlighted components
+  \foreach \n in {agent,req,state,router,rep,help} {\node[hl, fit=(\n)] {};}
+  \node[hl, fit=(sensors)] {};
+  % command: agent -> laptop -> relay -> DM -> camera
+  \draw[flowreq] (agent.south) -- (agent |- mcp.north);
+  \draw[flowreq] (req.east) -- (router.west);
+  \draw[flowreq] (router.east) -- (rep.west);
+  \draw[flowreq] (help.south) -- (help.south |- sensors.north);
+  % reply: camera -> DM -> relay
+  \draw[flowret] ([xshift=-5pt]help.south |- sensors.north) -- ([xshift=-5pt]help.south);
+  \draw[flowret] ([yshift=-5pt]rep.west) -- ([yshift=-5pt]router.east);
+
+  % reply: relay -> laptop -> state -> agent
+  \draw[flowret] ([yshift=-5pt]router.west) -- ([yshift=-5pt]req.east);
+  \draw[flowret] ([yshift=-5pt]req.west) .. controls +(-0.32,0) and +(-0.32,0) .. (state.west);
+  \draw[flowret] ([xshift=-5pt]agent |- mcp.north) -- ([xshift=-5pt]agent.south);
+  % numbered steps
+  \node[badge] at (agent.north west) {1};
+  \node[badge] at (state.east) {3};
+  \node[badge] at ($(agent.south)!0.5!(agent |- mcp.north)+(0.4,0)$) {4};
+  \node[badge] at (sensors.north west) {2};
+  % labels
+  \node[tag, anchor=south] at ([yshift=7pt]agent.north) {take\_camera\_image};
+  \node[tag, anchor=north] at ([yshift=-3pt]mcp.south) {image saved};
+  % step list
+  \flowbadge{1}{Agent calls \code{take\_camera\_image}}
+  \flowreqline{REQ\too ROUTER\too DM driver\too REP\too Helpers\too Sensors}
+  \flowbadge{2}{Camera acquires}
+  \flowretline{Sensors\too Helpers\too REP\too DM driver\too ROUTER\too REQ\too State}
+  \flowbadge{3}{\code{image saved}}
+  \flowbadge{4}{Result returns to the agent}
+}
+\input{amadeus_diagram_core}

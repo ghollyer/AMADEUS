@@ -155,6 +155,26 @@ def _mock_server(ready_event: threading.Event, stop_event: threading.Event) -> N
             }
             sock.send_json(meta, flags=zmq.SNDMORE)
             sock.send(arr.tobytes())
+        elif cmd == "live_start":
+            p = req.get("params", {})
+            sock.send_json({
+                "status": "ok",
+                "data": {"active": True, "detector": p.get("detector", "stem"),
+                         "interval_ms": p.get("interval_ms", 100)},
+                "request_id": rid,
+            })
+        elif cmd == "live_stop":
+            sock.send_json({
+                "status": "ok",
+                "data": {"stopped": True, "detector": "stem"},
+                "request_id": rid,
+            })
+        elif cmd == "live_status":
+            sock.send_json({
+                "status": "ok",
+                "data": {"active": False, "detector": None, "frame_index": 0},
+                "request_id": rid,
+            })
         elif cmd == "error_cmd":
             sock.send_json({"status": "error", "error": "deliberate error", "request_id": rid})
         else:
@@ -200,6 +220,15 @@ async def test_send_command_image(mock_server):
     assert arr.shape == (8, 8)
     assert arr.dtype == np.float32
     np.testing.assert_array_equal(arr, np.ones((8, 8), dtype=np.float32))
+
+
+async def test_image_command_single_frame_error_fails_fast(mock_server):
+    # Error replies are one frame; the client must not wait for a pixel frame.
+    async with ZMQClient(f"tcp://127.0.0.1:{PORT}", timeout_ms=3000) as client:
+        with pytest.raises(RuntimeError, match="deliberate error"):
+            await asyncio.wait_for(client.send_command_image("error_cmd"), timeout=2)
+        # and the socket is still usable afterwards
+        assert "mock" in await asyncio.wait_for(client.ping(), timeout=5)
 
 
 async def test_error_response_raises(mock_server):
@@ -269,3 +298,55 @@ async def test_load_dm_file_round_trip(mock_server):
     # Energy-axis calibration survives the round trip
     energy_axis = next(a for a in meta["data"]["axes"] if a["index"] == 2)
     assert energy_axis["units"] == "keV"
+
+
+async def test_live_start_stop_round_trip(mock_server):
+    async with ZMQClient(f"tcp://127.0.0.1:{PORT}", timeout_ms=3000) as client:
+        started = await asyncio.wait_for(
+            client.send_command("live_start", {"detector": "stem", "interval_ms": 50}),
+            timeout=5,
+        )
+        assert started["active"] is True
+        assert started["detector"] == "stem"
+        stopped = await asyncio.wait_for(client.send_command("live_stop"), timeout=5)
+        assert stopped["stopped"] is True
+
+
+# ---------------------------------------------------------------------------
+# Monitor integration — hooks fire through the real client; pause vetoes sends
+# ---------------------------------------------------------------------------
+
+async def test_monitor_records_command_through_client(mock_server, tmp_path):
+    from client.monitor import Monitor
+    mon = Monitor(tmp_path / "monitor", tmp_path / "images")
+    async with ZMQClient(f"tcp://127.0.0.1:{PORT}", timeout_ms=3000) as client:
+        client.set_monitor(mon)
+        await asyncio.wait_for(client.send_command("get_focus"), timeout=5)
+    snap = mon.snapshot()
+    assert snap["history"][-1] == {**snap["history"][-1], "cmd": "get_focus", "status": "ok"}
+    assert snap["current_command"] is None  # cleared after completion
+
+
+async def test_monitor_pause_vetoes_send(mock_server, tmp_path):
+    from client.monitor import Monitor, PausedError
+    mon = Monitor(tmp_path / "monitor", tmp_path / "images")
+    mon.set_paused(True)
+    async with ZMQClient(f"tcp://127.0.0.1:{PORT}", timeout_ms=3000) as client:
+        client.set_monitor(mon)
+        with pytest.raises(PausedError):
+            await asyncio.wait_for(client.send_command("get_focus"), timeout=5)
+        # ping is exempt, so health checks still work while paused
+        ver = await asyncio.wait_for(client.ping(), timeout=5)
+    assert "mock" in ver
+
+
+async def test_monitor_records_error_through_client(mock_server, tmp_path):
+    from client.monitor import Monitor
+    mon = Monitor(tmp_path / "monitor", tmp_path / "images")
+    async with ZMQClient(f"tcp://127.0.0.1:{PORT}", timeout_ms=3000) as client:
+        client.set_monitor(mon)
+        with pytest.raises(RuntimeError, match="deliberate error"):
+            await asyncio.wait_for(client.send_command("error_cmd"), timeout=5)
+    snap = mon.snapshot()
+    assert snap["history"][-1]["status"] == "error"
+    assert snap["dm_ok"] is False

@@ -49,12 +49,19 @@ def _get_as_float(path: str):
 def _get_as_string(path: str):
     if path not in _tag_store:
         return False, ""
-    return True, str(_tag_store[path])
+    val = _tag_store[path]
+    # Real DM hands non-ASCII strings back as bytes — pass bytes through.
+    return True, val if isinstance(val, bytes) else str(val)
+
+
+def _set_as_string(path: str, value):
+    _tag_store[path] = value
 
 
 _tg_mock = MagicMock(name="TagGroup")
 _tg_mock.GetTagAsFloat.side_effect = _get_as_float
 _tg_mock.GetTagAsString.side_effect = _get_as_string
+_tg_mock.SetTagAsString.side_effect = _set_as_string
 
 _dm.GetPersistentTagGroup = MagicMock(return_value=_tg_mock)
 _dm.ExecuteScriptString = MagicMock()
@@ -66,8 +73,9 @@ _dm.OpenImage = MagicMock()
 sys.modules["DigitalMicrograph"] = _dm
 
 # ─── Now safe to import helpers ──────────────────────────────────────────────
-from dm_server.helpers import microscope, stage, camera, spectroscopy, eds, digiscan, files  # noqa: E402
-from dm_server.helpers._dm_util import safe_exec_script  # noqa: E402
+from dm_server.helpers import microscope, stage, camera, spectroscopy, eds, digiscan, files, live, windows  # noqa: E402
+from dm_server.helpers._dm_util import safe_exec_script, exec_script, WRAP_HEAD, WRAP_TAIL  # noqa: E402
+from common.dmscript_lint import assert_valid  # noqa: E402
 
 PREFIX = "__amadeus__"
 
@@ -84,9 +92,16 @@ def _set(key: str, value) -> None:
     _tag_store[_tag(key)] = value
 
 
+def _unwrap(script: str) -> str:
+    """Strip exec_script's try/catch wrapper to get the helper's script."""
+    if script.startswith(WRAP_HEAD) and script.endswith(WRAP_TAIL):
+        return script[len(WRAP_HEAD):-len(WRAP_TAIL)]
+    return script
+
+
 def _scripts() -> list[str]:
-    """All scripts passed to ExecuteScriptString in this test."""
-    return [c.args[0] for c in _dm.ExecuteScriptString.call_args_list]
+    """All scripts the helpers ran in this test (wrapper stripped)."""
+    return [_unwrap(c.args[0]) for c in _dm.ExecuteScriptString.call_args_list]
 
 
 def _combined() -> str:
@@ -105,6 +120,7 @@ def reset():
     _tg_mock.reset_mock()
     _tg_mock.GetTagAsFloat.side_effect = _get_as_float
     _tg_mock.GetTagAsString.side_effect = _get_as_string
+    _tg_mock.SetTagAsString.side_effect = _set_as_string
     _dm.GetPersistentTagGroup.return_value = _tg_mock
     # Shared image mock — used by both camera_acquire and stem_acquire
     _img = MagicMock()
@@ -124,7 +140,17 @@ def reset():
     _tag_store[_tag("focus:opmode")] = "IMAGING"
     _tag_store[_tag("opmode")]       = "IMAGING"
     _tag_store[_tag("state:opmode")] = "IMAGING"
+    # get_microscope_state also reads EMGetSpotSize() -> state:spot.
+    _tag_store[_tag("state:spot")]   = 3.0
+    # The live helper holds module-level session state — clear between tests.
+    live._SESSION = None
     yield
+    live._SESSION = None
+    # Every DM-Script a helper generated in this test must pass the offline
+    # syntax check — DM itself only reports these on the instrument.
+    for c in _dm.ExecuteScriptString.call_args_list:
+        if c.args and isinstance(c.args[0], str):
+            assert_valid(c.args[0])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -135,7 +161,8 @@ class TestSafeExecScript:
     def test_passes_script_to_dm(self):
         _set("dummy", 1.0)  # prevent tag validation failure if called with tags
         safe_exec_script("number x = 1")
-        _dm.ExecuteScriptString.assert_called_once_with("number x = 1")
+        _dm.ExecuteScriptString.assert_called_once()
+        assert _scripts() == ["number x = 1"]
 
     def test_raises_on_dm_exception(self):
         _dm.ExecuteScriptString.side_effect = RuntimeError("DM exploded")
@@ -159,6 +186,117 @@ class TestSafeExecScript:
             safe_exec_script("EMSetFocus(-999)")
         assert "EMSetFocus" in str(exc_info.value)
         _dm.ExecuteScriptString.side_effect = None
+
+
+class TestDmText:
+    """DM returns non-ASCII strings as bytes; never leak the b'..' repr."""
+
+    def test_cp1252_micro_sign(self):
+        from dm_server.helpers._dm_util import dm_text
+        assert dm_text(b"\xb5m") == "µm"
+
+    def test_utf8_bytes(self):
+        from dm_server.helpers._dm_util import dm_text
+        assert dm_text("µm".encode("utf-8")) == "µm"
+
+    def test_str_passthrough(self):
+        from dm_server.helpers._dm_util import dm_text
+        assert dm_text("nm") == "nm"
+        assert dm_text("") == ""
+
+
+class _FakeDMErrors:
+    """ExecuteScriptString as observed in DM (2026-11-09, UTM VM):
+
+    * A runtime Throw inside the try/catch wrapper is caught in DM-Script and
+      GetExceptionString() goes to the error tag (ANSI bytes if non-ASCII).
+    * Uncaught, a non-ASCII message reaches Python as RuntimeError() with no args.
+    * Function/class definitions inside the wrapper's block fail to compile, so
+      the wrapped call raises before anything runs.
+    """
+
+    def __init__(self, message=None, defines_function=False):
+        self.message, self.defines_function, self.ran = message, defines_function, []
+
+    def __call__(self, script):
+        wrapped = script.startswith(WRAP_HEAD)
+        if wrapped and self.defines_function:
+            raise RuntimeError("Error in line 2\r\nSyntax error")   # compile: nothing ran
+        self.ran.append(_unwrap(script))
+        if self.message is None:
+            return
+        if wrapped:
+            _set("script_error", self.message.encode("cp1252"))
+            return
+        text = self.message
+        raise RuntimeError() if not text.isascii() else RuntimeError(text)
+
+
+@pytest.fixture
+def dm_errors():
+    def install(**kw):
+        fake = _FakeDMErrors(**kw)
+        _dm.ExecuteScriptString.side_effect = fake
+        return fake
+    yield install
+    _dm.ExecuteScriptString.side_effect = None
+
+
+class TestBug13NonAsciiErrors:
+    """Regression: DM-Script errors with non-ASCII text arrived with no message."""
+
+    def test_non_ascii_runtime_error_keeps_its_text(self, dm_errors):
+        dm_errors(message="AMADEUS-PROBE scale 5 µm")
+        with pytest.raises(RuntimeError, match="AMADEUS-PROBE scale 5 µm"):
+            exec_script('Throw("AMADEUS-PROBE scale 5 µm")')
+
+    def test_safe_exec_script_reports_it_too(self, dm_errors):
+        dm_errors(message="Kamera nicht verfügbar")
+        with pytest.raises(RuntimeError, match="Kamera nicht verfügbar"):
+            safe_exec_script("CameraAcquire(0)")
+
+    def test_ascii_error_unchanged(self, dm_errors):
+        dm_errors(message="Please select an image window for this operation.")
+        with pytest.raises(RuntimeError, match="^Please select an image window"):
+            exec_script("image i := GetFrontImage()")
+
+    def test_success_runs_once_and_raises_nothing(self, dm_errors):
+        fake = dm_errors()
+        exec_script("number x = 1")
+        assert fake.ran == ["number x = 1"]
+        assert _dm.ExecuteScriptString.call_count == 1
+
+    def test_stale_error_tag_does_not_leak_into_next_call(self, dm_errors):
+        fake = dm_errors(message="first µ")
+        with pytest.raises(RuntimeError):
+            exec_script("a")
+        fake.message = None
+        exec_script("b")            # must not re-raise the previous error
+
+    def test_function_definitions_fall_back_to_unwrapped(self, dm_errors):
+        # Wrapped, a function definition doesn't compile; it must then run as
+        # written, exactly once (the wrapped attempt never executed).
+        fake = dm_errors(defines_function=True)
+        script = "number twice(number x) { return 2 * x; }\nResult(twice(3))"
+        exec_script(script)
+        assert fake.ran == [script]
+
+    def test_unwrappable_script_with_dropped_message_says_so(self, dm_errors):
+        dm_errors(message="5 µm", defines_function=True)
+        with pytest.raises(RuntimeError, match="dropped its message"):
+            exec_script("number f() { return 1; }\nThrow(\"5 µm\")")
+
+    def test_genuine_syntax_error_reports_unwrapped_line_numbers(self):
+        def fake(script):
+            if script.startswith(WRAP_HEAD):
+                raise RuntimeError("Error in line 2\r\nExpecting an expression")
+            raise RuntimeError("Error in line 1\r\nExpecting an expression")
+        _dm.ExecuteScriptString.side_effect = fake
+        try:
+            with pytest.raises(RuntimeError, match="line 1"):
+                exec_script("number x = ")
+        finally:
+            _dm.ExecuteScriptString.side_effect = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -201,6 +339,14 @@ class TestFocusCalibrationHelpers:
         # Some DM builds append "\n" to EMGetOperationMode().
         imaging = microscope._focus_cal_for_mode("IMAGING")
         assert microscope._focus_cal_for_mode("IMAGING\n") is imaging
+
+    def test_is_known_focus_mode(self):
+        # Calibrated modes are recognised (case/whitespace-insensitive);
+        # uncalibrated or empty modes are not, so callers can refuse the write.
+        assert microscope._is_known_focus_mode("IMAGING")
+        assert microscope._is_known_focus_mode("scanning\n")
+        assert not microscope._is_known_focus_mode("DIFFRACTION")
+        assert not microscope._is_known_focus_mode("")
 
 
 class TestGetFocus:
@@ -275,6 +421,14 @@ class TestSetFocus:
         stem_cal = microscope._focus_cal_for_mode("SCANNING")
         assert f"EMSetFocus({stem_cal['focus_raw_at_zero']})" in _combined()
 
+    def test_refuses_uncalibrated_mode(self):
+        # An uncalibrated mode (e.g. DIFFRACTION) must raise rather than
+        # silently apply the IMAGING fallback and drive the lens out of range.
+        _set("opmode", "DIFFRACTION")
+        with pytest.raises(RuntimeError, match="no focus calibration"):
+            microscope.set_focus({"focus_nm": 0.0})
+        assert "EMSetFocus" not in _combined()
+
 
 class TestChangeFocus:
     def test_uses_em_change_focus_not_set_focus(self):
@@ -309,6 +463,14 @@ class TestChangeFocus:
         microscope.change_focus({"delta_nm": 10.0})
         stem_cal = microscope._focus_cal_for_mode("SCANNING")
         assert f"EMChangeFocus({10.0 * stem_cal['focus_raw_per_nm']})" in _combined()
+
+    def test_refuses_uncalibrated_mode(self):
+        # As with set_focus, a relative change in an uncalibrated mode must
+        # raise rather than apply the wrong slope.
+        _set("opmode", "DIFFRACTION")
+        with pytest.raises(RuntimeError, match="no focus calibration"):
+            microscope.change_focus({"delta_nm": 10.0})
+        assert "EMChangeFocus" not in _combined()
 
 
 class TestGetMagnification:
@@ -468,8 +630,8 @@ class TestGetMicroscopeState:
         microscope.get_microscope_state({})
         script = _combined()
         for fn in ("EMGetHighTension", "EMGetMagnification", "EMGetMagIndex",
-                   "EMGetFocus", "EMGetBeamBlanked", "EMGetColumnValvesOpen",
-                   "EMGetBeamShift", "EMGetBeamTilt",
+                   "EMGetFocus", "EMGetSpotSize", "EMGetBeamBlanked",
+                   "EMGetColumnValvesOpen", "EMGetBeamShift", "EMGetBeamTilt",
                    "EMGetObjectiveStigmation", "EMGetCondenserStigmation"):
             assert fn in script, f"{fn} missing from get_microscope_state script"
         # EMGetMicroscopeName must NOT be called by the script — it is
@@ -489,7 +651,7 @@ class TestGetMicroscopeState:
             _set(k, 0.0)
         result = microscope.get_microscope_state({})
         for key in ("high_tension_kV", "magnification", "mag_index", "focus_nm",
-                    "beam_blanked", "column_valves_open", "beam_shift",
+                    "spot_size", "beam_blanked", "column_valves_open", "beam_shift",
                     "beam_tilt", "stigmation", "microscope_name",
                     "operation_mode"):
             assert key in result, f"Key {key!r} missing from get_microscope_state result"
@@ -1363,3 +1525,653 @@ class TestLoadDmFile:
             assert meta["image_meta"]["calibration"]["x_scale"] == 1.0
         finally:
             _os.unlink(path)
+
+
+# ─── Live scan (DigiScan + camera continuous) ────────────────────────────────
+
+class TestLiveScanStem:
+    def _start(self, params=None):
+        _set("live:param_id", 7)
+        return live.live_start({"detector": "stem", **(params or {})})
+
+    def test_start_uses_continuous_async_acquisition(self):
+        self._start()
+        # continuous=1, synchronous=0 — DM scans in the background.
+        assert "DSStartAcquisition(paramID, 1, 0)" in _combined()
+
+    def test_start_does_not_delete_parameters(self):
+        # The continuous acquisition owns paramID; deleting it would stop the scan.
+        self._start()
+        assert "DSDeleteParameters" not in _combined()
+
+    def test_start_sets_session_active(self):
+        self._start({"signal_index": 2})
+        assert live.is_active()
+        status = live.live_status({})
+        assert status["active"] is True
+        assert status["detector"] == "stem"
+        assert status["signal_index"] == 2
+
+    def test_grab_frame_returns_meta_and_array(self):
+        self._start()
+        frame = live.grab_frame()
+        assert frame is not None
+        meta, arr = frame
+        assert meta["detector"] == "stem"
+        assert meta["frame_index"] == 1
+        assert arr.shape == (64, 64)
+        # frame_index advances on each grab
+        assert live.grab_frame()[0]["frame_index"] == 2
+
+    def test_stop_deletes_parameters_and_clears_session(self):
+        self._start()
+        result = live.live_stop({})
+        assert result["stopped"] is True
+        assert not live.is_active()
+        assert "DSDeleteParameters(7)" in _combined()
+
+    def test_poll_interval_reflects_session(self):
+        assert live.poll_interval_ms() == 250  # idle
+        self._start({"interval_ms": 40})
+        assert live.poll_interval_ms() == 40
+
+
+class TestLiveScanCamera:
+    def _start(self, params=None):
+        _set("live:cam_id", 3)
+        _set("live:scx", 0.05)
+        _set("live:scy", 0.05)
+        _set("live:units", "1/nm")
+        return live.live_start({"detector": "camera", **(params or {})})
+
+    def test_start_uses_camera_continuous_acquisition(self):
+        self._start()
+        assert "CameraStartContinuousAcquisition" in _combined()
+
+    def test_start_records_camera_session(self):
+        self._start()
+        status = live.live_status({})
+        assert status["detector"] == "camera"
+        assert status["camera_id"] == 3
+        assert status["calibration"]["units"] == "1/nm"
+
+    def test_grab_frame_pulls_with_get_frame_in_continuous_mode(self):
+        self._start()
+        _set("live:got", 1)
+        frame = live.grab_frame()
+        assert frame is not None
+        assert "CameraGetFrameInContinuousMode" in _combined()
+        assert frame[0]["detector"] == "camera"
+
+    def test_grab_frame_returns_none_on_timeout(self):
+        self._start()
+        _set("live:got", 0)  # no frame available within max_wait
+        assert live.grab_frame() is None
+
+    def test_stop_calls_camera_stop(self):
+        self._start()
+        live.live_stop({})
+        assert "CameraStopContinuousAcquisition(3)" in _combined()
+
+
+class TestLiveScanSwitching:
+    def test_starting_camera_tears_down_stem(self):
+        _set("live:param_id", 5)
+        live.live_start({"detector": "stem"})
+        assert live.live_status({})["detector"] == "stem"
+        # Switching detectors stops the previous scan first.
+        _set("live:cam_id", 1)
+        _set("live:scx", 0.1)
+        _set("live:scy", 0.1)
+        _set("live:units", "nm")
+        live.live_start({"detector": "camera"})
+        assert live.live_status({})["detector"] == "camera"
+        assert "DSDeleteParameters(5)" in _combined()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# files.py — read_file_chunk + client download_file (raw file transfer)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import hashlib as _hashlib  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+
+def _blob(n: int) -> bytes:
+    return bytes((i * 7 + 3) % 256 for i in range(n))
+
+
+class TestReadFileChunk:
+    def test_chunks_cover_file_exactly(self, tmp_path):
+        data = _blob(1000)
+        p = tmp_path / "x.dm4"
+        p.write_bytes(data)
+        got, offset = b"", 0
+        while True:
+            meta, arr = files.read_file_chunk({"path": str(p), "offset": offset, "length": 300})
+            assert arr.dtype == np.uint8 and arr.ndim == 1
+            assert meta["offset"] == offset and meta["length"] == arr.size
+            assert meta["sha256"] == _hashlib.sha256(arr.tobytes()).hexdigest()
+            assert meta["size_bytes"] == 1000
+            got += arr.tobytes()
+            offset += arr.size
+            if meta["eof"]:
+                break
+        assert got == data and offset == 1000
+
+    def test_empty_file(self, tmp_path):
+        p = tmp_path / "empty.bin"
+        p.write_bytes(b"")
+        meta, arr = files.read_file_chunk({"path": str(p)})
+        assert meta["eof"] and arr.size == 0
+
+    def test_length_clamped(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(files, "MAX_CHUNK_BYTES", 10)
+        p = tmp_path / "x.bin"
+        p.write_bytes(_blob(50))
+        meta, arr = files.read_file_chunk({"path": str(p), "length": 10**9})
+        assert arr.size == 10 and not meta["eof"]
+
+    def test_errors(self, tmp_path):
+        with pytest.raises(ValueError):
+            files.read_file_chunk({})
+        with pytest.raises(FileNotFoundError):
+            files.read_file_chunk({"path": str(tmp_path / "missing.dm4")})
+        with pytest.raises(FileNotFoundError):     # a directory is not a file
+            files.read_file_chunk({"path": str(tmp_path)})
+        p = tmp_path / "x.bin"
+        p.write_bytes(b"abc")
+        with pytest.raises(ValueError):
+            files.read_file_chunk({"path": str(p), "offset": -1})
+
+    def test_registered_as_binary_command(self):
+        from dm_server.server import COMMANDS
+        from drivers import dm
+        assert COMMANDS["read_file_chunk"] == (files.read_file_chunk, True)
+        assert "read_file_chunk" in dm.SLOT_COMMANDS["files"]
+
+
+class _FakeDMLink:
+    """send_command_image that runs the real DM helper and packages the reply
+    the way dm_server.server._dispatch does (image_meta split out, the rest
+    under "data", array bytes as the second frame)."""
+
+    def __init__(self, mutate=None, corrupt_at=None):
+        self.calls = 0
+        self.mutate = mutate          # callable(call_no) run before each chunk
+        self.corrupt_at = corrupt_at  # call number whose bytes get flipped
+
+    async def send_command_image(self, cmd, params=None, **_):
+        assert cmd == "read_file_chunk"
+        self.calls += 1
+        if self.mutate:
+            self.mutate(self.calls)
+        data, arr = files.read_file_chunk(dict(params))
+        raw = np.frombuffer(arr.tobytes(), dtype=np.uint8).copy()
+        if self.corrupt_at == self.calls and raw.size:
+            raw[0] ^= 0xFF
+        meta = {"status": "ok", "has_image": True,
+                "image_meta": {"shape": list(raw.shape), "dtype": "uint8",
+                               **data.get("image_meta", {})},
+                "data": {k: v for k, v in data.items() if k != "image_meta"}}
+        return meta, raw
+
+
+class TestDownloadFile:
+    async def test_byte_identical_copy(self, tmp_path):
+        from client.tools.files import download_file
+        src = tmp_path / "remote" / "scan.dm4"
+        src.parent.mkdir()
+        data = _blob(2500)
+        src.write_bytes(data)
+        _os.utime(src, (1_700_000_000, 1_700_000_000))
+        link = _FakeDMLink()
+        out = await download_file(link, str(src), tmp_path / "local", chunk_bytes=1000)
+        local = Path(out["local_path"])
+        assert local.read_bytes() == data
+        assert local.name == "scan.dm4"
+        assert out["size_bytes"] == 2500
+        assert out["sha256"] == _hashlib.sha256(data).hexdigest()
+        assert link.calls == 3
+        assert int(local.stat().st_mtime) == 1_700_000_000
+        assert list((tmp_path / "local").glob("*.part")) == []
+
+    async def test_never_overwrites(self, tmp_path):
+        from client.tools.files import download_file
+        src = tmp_path / "a.dm4"
+        src.write_bytes(b"new")
+        dest = tmp_path / "local"
+        dest.mkdir()
+        (dest / "a.dm4").write_bytes(b"old")
+        out = await download_file(_FakeDMLink(), str(src), dest)
+        assert Path(out["local_path"]).name == "a (1).dm4"
+        assert (dest / "a.dm4").read_bytes() == b"old"
+
+    async def test_empty_file(self, tmp_path):
+        from client.tools.files import download_file
+        src = tmp_path / "e.dm4"
+        src.write_bytes(b"")
+        out = await download_file(_FakeDMLink(), str(src), tmp_path / "local")
+        assert Path(out["local_path"]).read_bytes() == b""
+
+    async def test_corrupt_chunk_rejected_no_partial(self, tmp_path):
+        from client.tools.files import download_file
+        src = tmp_path / "c.dm4"
+        src.write_bytes(_blob(3000))
+        with pytest.raises(RuntimeError, match="SHA-256"):
+            await download_file(_FakeDMLink(corrupt_at=2), str(src),
+                                tmp_path / "local", chunk_bytes=1000)
+        assert list((tmp_path / "local").iterdir()) == []
+
+    async def test_file_changing_mid_transfer_rejected(self, tmp_path):
+        from client.tools.files import download_file
+        src = tmp_path / "growing.dm4"
+        src.write_bytes(_blob(3000))
+
+        def grow(call_no):
+            if call_no == 2:
+                with open(src, "ab") as fh:
+                    fh.write(b"more")
+
+        with pytest.raises(RuntimeError, match="changed"):
+            await download_file(_FakeDMLink(mutate=grow), str(src),
+                                tmp_path / "local", chunk_bytes=1000)
+        assert list((tmp_path / "local").iterdir()) == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Regressions from the 2026-11-07 F200 session
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestBugLog20261107:
+    MICRO_BYTES = b"\xb5m"   # what DM hands back for "µm"
+
+    # Bug 1 — get_stem_settings DM-Script syntax (also guarded by the lint fixture)
+    def test_bug1_stem_settings_script_valid(self):
+        _set("ds:n_signals", 0.0)
+        _set("ds:active", 0.0)
+        digiscan.get_stem_settings({})
+        assert "{ active = 1; }" in _combined()
+
+    # Bug 2 — bytes units leaked as "b'\\xb5m'"
+    def test_bug2_camera_acquire_units(self):
+        _set_camera_tags(units=self.MICRO_BYTES)
+        meta, _ = camera.camera_acquire({"exposure_s": 0.1})
+        assert meta["image_meta"]["calibration"]["units"] == "µm"
+
+    def test_bug2_stem_acquire_units(self):
+        _set("ds:name", "STEM")
+        _dm.FindFrontImage.return_value.GetDimensionCalibration.return_value = (
+            0.0, 0.2, self.MICRO_BYTES)
+        meta, _ = digiscan.stem_acquire({"width": 16, "height": 16})
+        assert meta["image_meta"]["calibration"]["units"] == "µm"
+
+    def test_bug2_load_dm_file_units_and_name(self, tmp_path):
+        p = tmp_path / "x.dm4"
+        p.write_bytes(b"")
+        img = MagicMock()
+        img.GetNumArray.return_value = np.zeros((4, 4), dtype=np.float32)
+        img.GetNumDimensions.return_value = 2
+        img.GetDimensionSize.return_value = 4
+        img.GetDimensionCalibration.return_value = (0.0, 0.5, self.MICRO_BYTES)
+        img.GetIntensityScale.return_value = 1.0
+        img.GetIntensityOrigin.return_value = 0.0
+        img.GetIntensityUnitString.return_value = b"e\xb7s"
+        img.GetName.return_value = b"\xc5-scan"
+        _dm.OpenImage.return_value = img
+        meta, _ = files.load_dm_file({"path": str(p)})
+        assert [a["units"] for a in meta["axes"]] == ["µm", "µm"]
+        assert meta["intensity"]["units"] == "e·s"
+        assert meta["name"] == "Å-scan"
+
+    # Bug 3 — STEM live stop must actually stop DigiScan (valid script that
+    # contains the stop; the lint fixture rejects the old one-line loop)
+    def test_bug3_stem_teardown_stops_acquisition(self):
+        _set("live:param_id", 7.0)
+        live.live_start({"detector": "stem"})
+        _dm.ExecuteScriptString.reset_mock()
+        live.live_stop({})
+        (script,) = [c.args[0] for c in _dm.ExecuteScriptString.call_args_list]
+        assert "DSStopAcquisition(-1)" in script
+        assert "DSDeleteParameters(7)" in script
+        assert_valid(script)
+
+    # Bug 4 — camera live frames were uncalibrated. Verified on the F200: the
+    # destination image stays at scale 1 / no units even after continuous
+    # frames, so the calibration must be copied from a CameraAcquire
+    # reference frame *before* it is read and streaming starts.
+    def test_bug4_camera_live_copies_calibration_from_reference_frame(self):
+        _set("live:cam_id", 0)
+        _set("live:scx", 0.00277)      # what dst reads after the copy
+        _set("live:scy", 0.00277)
+        _set("live:units", self.MICRO_BYTES)
+        live.live_start({"detector": "camera", "exposure_s": 0.05, "binning": 4})
+        script = _combined()
+        ref = script.index("image _cal_ref := CameraAcquire(cam_id, 0.05, 4, 4, proc)")
+        copy = script.index("ImageCopyCalibrationFrom(dst, _cal_ref)")
+        read = script.index("dst.ImageGetDimensionCalibration(0")
+        start = script.index("CameraStartContinuousAcquisition")
+        assert script.index("CameraCreateImageForAcquire") < ref < copy < start
+        assert copy < read
+
+        _set("live:got", 1)
+        meta, _ = live.grab_frame()
+        cal = meta["image_meta"]["calibration"]
+        assert cal == {"x_scale": 0.00277, "y_scale": 0.00277, "units": "µm"}
+        assert live.live_status({})["calibration"] == cal
+
+    def test_bug4_frames_do_not_overwrite_session_calibration(self):
+        # The old per-frame re-read is gone: an uncalibrated front image
+        # mid-stream must not clobber the calibration taken at start.
+        _set("live:cam_id", 0)
+        _set("live:scx", 0.00277)
+        _set("live:scy", 0.00277)
+        _set("live:units", "nm")
+        live.live_start({"detector": "camera"})
+        _dm.FindFrontImage.return_value.GetDimensionCalibration.return_value = (0.0, 1.0, "")
+        _set("live:got", 1)
+        meta, _ = live.grab_frame()
+        assert meta["image_meta"]["calibration"]["x_scale"] == 0.00277
+
+
+# ─── DM document windows (list / select / close) ────────────────────────────
+
+class _FakeWindowManager:
+    """Stands in for DM's window list behind the mocked ExecuteScriptString.
+
+    Answers the listing script by writing the ``win:*`` tags the real script
+    writes, and applies ``WindowSelect`` / ``WindowClose`` to its z-ordered
+    list, so ``select_window`` / ``close_window`` see their own effect when
+    they re-list. Behaviour mirrors DM as observed in the dev VM (2026-11-09).
+    """
+
+    def __init__(self, windows, active_ws=1):
+        self.windows = [dict(w) for w in windows]   # index 0 = front
+        self.active_ws = active_ws
+        self.closed_with_verify = []
+        self.ignore = ()        # script prefixes DM "runs" without effect
+        self.saved_stems = []
+        self.fail_save = False  # DM "saves" but writes no file
+
+    @staticmethod
+    def image(doc_id, name, letter="A", ws=1, dirty=True, path=""):
+        return {"title": f"{letter}: {name}", "type": 5, "ws": ws, "doc_id": doc_id,
+                "doc_name": name, "dirty": dirty, "path": path}
+
+    @staticmethod
+    def script(title, ws=1):
+        return {"title": title, "type": 4, "ws": ws, "doc_id": -1}
+
+    def _find(self, script):
+        import re
+        m = re.search(r"GetImageDocumentByID\((\d+)\)", script)
+        if m:
+            return next(w for w in self.windows if w["doc_id"] == int(m.group(1)))
+        m = re.search(r"GetDocumentWindow\((\d+)\)", script)
+        return self.windows[int(m.group(1))]
+
+    def __call__(self, script):
+        script = _unwrap(script)
+        if script.startswith(self.ignore):
+            return
+        if "CountDocumentWindows()" in script:
+            self._write_tags()
+        elif script.startswith("WindowSelect("):
+            w = self._find(script)
+            self.windows.remove(w)
+            self.windows.insert(0, w)
+            self.active_ws = w["ws"]
+        elif script.startswith("WindowClose("):
+            w = self._find(script)
+            self.closed_with_verify.append(script.rstrip().endswith(", 1)"))
+            self.windows.remove(w)
+        elif "ImageDocumentSave(0)" in script:
+            # The no-prompt save: write <stem>.dm4, link the doc, clear dirty.
+            import re
+            w = self._find(script)
+            assert 'SetCurrentFileSaveFormat("Gatan Format")' in script
+            stem = re.search(r'ImageDocumentSetCurrentFile\("([^"]*)"\)', script).group(1)
+            key = re.search(r'"__amadeus__:(win:saved:[0-9a-f]+)"', script).group(1)
+            self.saved_stems.append(stem)
+            if not self.fail_save:
+                Path(stem + ".dm4").write_bytes(b"DM4" * 10)
+                w["dirty"], w["path"] = False, stem + ".dm4"
+            _set(key, w["path"] if not self.fail_save else "")
+
+    def _write_tags(self):
+        _set("win:count", len(self.windows))
+        _set("win:active_ws", self.active_ws)
+        for i, w in enumerate(self.windows):
+            k = f"win:{i}:"
+            _set(k + "title", w["title"])
+            _set(k + "type", w["type"])
+            _set(k + "ws", w["ws"])
+            _set(k + "ws_name", f"Workspace {w['ws']}")
+            _set(k + "shown", 1 if w["ws"] == self.active_ws else 0)
+            for side, v in (("top", 10), ("left", 20), ("bottom", 110), ("right", 220)):
+                _set(k + side, v)
+            _set(k + "doc_id", w["doc_id"])
+            if w["doc_id"] >= 0:
+                _set(k + "doc_name", w["doc_name"])
+                _set(k + "dirty", 1 if w["dirty"] else 0)
+                _set(k + "n_images", 1)
+                _set(k + "path", w["path"])
+
+
+@pytest.fixture
+def dm_windows():
+    """Install a fake DM window list: A (front), the server script, B, C in ws 9."""
+    fwm = _FakeWindowManager([
+        _FakeWindowManager.image(191, "HAADF 0012", "A"),
+        _FakeWindowManager.script("PYTHON - start_amadeus_dm"),
+        _FakeWindowManager.image(192, "saved", "B", dirty=False,
+                                 path=r"C:\data\saved.dm4"),
+        _FakeWindowManager.image(193, "other ws", "C", ws=9),
+    ])
+    _dm.ExecuteScriptString.side_effect = fwm
+    yield fwm
+    _dm.ExecuteScriptString.side_effect = None
+
+
+class TestListWindows:
+    def test_lists_all_workspaces_front_first(self, dm_windows):
+        res = windows.list_windows({})
+        assert res["count"] == 4 and res["active_workspace_id"] == 1
+        assert [w["title"] for w in res["windows"]] == [
+            "A: HAADF 0012", "PYTHON - start_amadeus_dm", "B: saved", "C: other ws"]
+        assert [w["index"] for w in res["windows"]] == [0, 1, 2, 3]
+        assert res["windows"][3]["shown"] is False
+
+    def test_image_fields(self, dm_windows):
+        a, script, b, _ = windows.list_windows({})["windows"]
+        assert a["type"] == "image" and a["doc_id"] == 191
+        assert a["doc_name"] == "HAADF 0012"
+        assert a["unsaved"] is True and a["file_path"] is None
+        assert b["unsaved"] is False and b["file_path"] == r"C:\data\saved.dm4"
+        assert a["frame"] == {"top": 10, "left": 20, "bottom": 110, "right": 220}
+
+    def test_non_image_window_ignores_stale_image_tags(self, dm_windows):
+        # Index 1 was an image in an earlier listing: its old doc_name/path tags
+        # are still in the persistent tag group, but doc_id -1 must hide them.
+        _set("win:1:doc_name", "stale")
+        _set("win:1:path", r"C:\stale.dm4")
+        script = windows.list_windows({})["windows"][1]
+        assert script["type"] == "script" and script["doc_id"] is None
+        assert "doc_name" not in script and "file_path" not in script
+
+    def test_non_ascii_title_decoded(self, dm_windows):
+        dm_windows.windows[0]["title"] = "A: 5 \xb5m".encode("cp1252")
+        assert windows.list_windows({})["windows"][0]["title"] == "A: 5 µm"
+
+    def test_unknown_window_type_is_other(self, dm_windows):
+        dm_windows.windows[1]["type"] = 12505
+        w = windows.list_windows({})["windows"][1]
+        assert w["type"] == "other" and w["type_code"] == 12505
+
+    def test_script_uses_dm_window_api(self, dm_windows):
+        windows.list_windows({})
+        s = _combined()
+        for fn in ("CountDocumentWindows", "GetDocumentWindow", "WindowGetType",
+                   "ImageDocumentGetID", "ImageDocumentIsDirty",
+                   "ImageDocumentGetCurrentFile", "WorkspaceFindByWindow"):
+            assert fn in s
+
+
+class TestSelectWindow:
+    def test_select_by_doc_id_brings_to_front(self, dm_windows):
+        res = windows.select_window({"doc_id": 192})
+        assert res["front"] is True
+        assert res["selected"]["doc_id"] == 192 and res["selected"]["index"] == 0
+        assert "WindowSelect(GetImageDocumentByID(192).ImageDocumentGetWindow())" in _combined()
+
+    def test_select_in_other_workspace_switches(self, dm_windows):
+        res = windows.select_window({"title": "other ws"})
+        assert res["front"] is True and res["active_workspace_id"] == 9
+
+    def test_select_by_title_exact_then_case_insensitive(self, dm_windows):
+        assert windows.select_window({"title": "B: saved"})["selected"]["doc_id"] == 192
+        assert windows.select_window({"title": "haadf 0012"})["selected"]["doc_id"] == 191
+
+    def test_select_non_image_by_index(self, dm_windows):
+        res = windows.select_window({"index": 1})
+        assert res["front"] is True and res["selected"]["type"] == "script"
+        assert "WindowSelect(GetDocumentWindow(1))" in _combined()
+
+    def test_front_is_rechecked_not_assumed(self, dm_windows):
+        dm_windows.ignore = ("WindowSelect(",)
+        assert windows.select_window({"doc_id": 192})["front"] is False
+
+    @pytest.mark.parametrize("params, msg", [
+        ({}, "exactly one"),
+        ({"doc_id": 191, "index": 0}, "exactly one"),
+        ({"doc_id": None, "title": None, "index": None}, "exactly one"),
+        ({"doc_id": 999}, "no open image window has doc_id 999"),
+        ({"index": 4}, "out of range"),
+        ({"title": "nope"}, "no window titled"),
+    ])
+    def test_bad_targets_rejected(self, dm_windows, params, msg):
+        with pytest.raises(ValueError, match=msg):
+            windows.select_window(params)
+
+    def test_ambiguous_title_rejected(self, dm_windows):
+        dm_windows.windows.append(_FakeWindowManager.image(194, "HAADF 0012", "D"))
+        with pytest.raises(ValueError, match="matches 2 windows"):
+            windows.select_window({"title": "HAADF 0012"})
+
+    def test_refused_during_live_scan(self, dm_windows):
+        live._SESSION = {"detector": "camera"}
+        with pytest.raises(RuntimeError, match="live scan"):
+            windows.select_window({"doc_id": 192})
+        assert not any(s.startswith("WindowSelect(") for s in _scripts())
+
+
+class TestCloseWindow:
+    def test_closes_saved_image_without_flag(self, dm_windows):
+        res = windows.close_window({"doc_id": 192})
+        assert res["closed"]["doc_id"] == 192
+        assert res["discarded_unsaved"] is False and res["remaining"] == 3
+
+    def test_never_opens_dm_save_dialog(self, dm_windows):
+        # WindowClose(w, 1) puts up a modal dialog that would block DM's main
+        # thread — and with it the AMADEUS server.
+        windows.close_window({"doc_id": 192})
+        windows.close_window({"doc_id": 191, "discard_unsaved": True})
+        assert dm_windows.closed_with_verify == [False, False]
+
+    def test_unsaved_image_refused_without_flag(self, dm_windows):
+        with pytest.raises(ValueError, match="unsaved changes"):
+            windows.close_window({"doc_id": 191})
+        assert not any(s.startswith("WindowClose(") for s in _scripts())
+        assert len(dm_windows.windows) == 4
+
+    def test_unsaved_image_closed_with_discard(self, dm_windows):
+        res = windows.close_window({"title": "HAADF 0012", "discard_unsaved": True})
+        assert res["discarded_unsaved"] is True
+        assert [w["doc_id"] for w in dm_windows.windows] == [-1, 192, 193]
+
+    def test_script_window_never_closed(self, dm_windows):
+        with pytest.raises(ValueError, match="script window"):
+            windows.close_window({"index": 1, "discard_unsaved": True})
+        assert not any(s.startswith("WindowClose(") for s in _scripts())
+
+    def test_close_non_image_by_index_verified_by_count(self, dm_windows):
+        dm_windows.windows[1]["type"] = 12505   # some other kind of window
+        res = windows.close_window({"index": 1})
+        assert res["remaining"] == 3
+        assert "WindowClose(GetDocumentWindow(1), 0)" in _combined()
+
+    def test_reports_failure_if_dm_did_not_close(self, dm_windows):
+        dm_windows.ignore = ("WindowClose(",)
+        with pytest.raises(RuntimeError, match="did not close"):
+            windows.close_window({"doc_id": 192})
+
+    def test_refused_during_live_scan(self, dm_windows):
+        live._SESSION = {"detector": "stem"}
+        with pytest.raises(RuntimeError, match="live scan"):
+            windows.close_window({"doc_id": 192})
+        assert len(dm_windows.windows) == 4
+
+
+class TestSaveWindow:
+    def test_saves_unsaved_si_without_dialog_and_links_it(self, dm_windows, tmp_path):
+        target = tmp_path / "2026-11-19" / "NP_C1_SI"          # folder created
+        res = windows.save_window({"doc_id": 191, "path": str(target) + ".dm4"})
+        assert res["path"] == str(target) + ".dm4" and res["size_bytes"] == 30
+        assert res["unsaved"] is False and res["saved"]["doc_id"] == 191
+        # DM gets the path without extension and with forward slashes.
+        assert dm_windows.saved_stems == [str(target).replace("\\", "/")]
+        assert "ImageDocumentSave(0)" in _combined()           # 0 = never prompt
+        # Now linked to the file, so close needs no discard_unsaved.
+        assert windows.close_window({"doc_id": 191})["discarded_unsaved"] is False
+
+    def test_existing_file_needs_overwrite(self, dm_windows, tmp_path):
+        f = tmp_path / "si.dm4"
+        f.write_bytes(b"old")
+        with pytest.raises(ValueError, match="already exists"):
+            windows.save_window({"doc_id": 191, "path": str(f)})
+        assert dm_windows.saved_stems == []
+        assert windows.save_window({"doc_id": 191, "path": str(f),
+                                    "overwrite": True})["size_bytes"] == 30
+
+    @pytest.mark.parametrize("path, msg", [
+        ("", "give 'path'"),
+        ("relative\\si.dm4", "absolute"),
+        ("C:\\data\\si.tif", "only .dm4"),
+        ('C:\\data\\a"b.dm4', "quote"),
+    ])
+    def test_bad_paths_rejected_before_dm_runs_anything(self, dm_windows, path, msg):
+        with pytest.raises(ValueError, match=msg):
+            windows.save_window({"doc_id": 191, "path": path})
+        assert dm_windows.saved_stems == []
+
+    def test_script_window_cannot_be_saved(self, dm_windows, tmp_path):
+        with pytest.raises(ValueError, match="not an image window"):
+            windows.save_window({"index": 1, "path": str(tmp_path / "x.dm4")})
+
+    def test_missing_file_after_save_is_an_error(self, dm_windows, tmp_path):
+        dm_windows.fail_save = True
+        with pytest.raises(RuntimeError, match="no file"):
+            windows.save_window({"doc_id": 191, "path": str(tmp_path / "x.dm4")})
+
+
+def test_window_commands_registered_and_routed_to_dm():
+    from drivers import dm
+    src = (Path(__file__).resolve().parents[1] / "dm_server" / "server.py").read_text()
+    for cmd, fn in (("list_windows", "list_windows"), ("select_window", "select_window"),
+                    ("close_window", "close_window"), ("save_window", "save_window")):
+        assert f'"{cmd}":' in src and f"_win.{fn}" in src
+        assert cmd in dm.EXTRAS
+        assert dm.translate(f"dm.{cmd}", {})[0] == cmd
+
+
+def test_every_dm_server_command_is_reachable_through_the_dm_driver():
+    # Nothing defaults to DM any more: a command dm_server registers but the
+    # DM driver doesn't list can't be reached at all.
+    from dm_server.server import COMMANDS
+    from drivers import dm
+    reachable = {dm.translate(c, {})[0] for slot in dm.SLOT_COMMANDS
+                 for c in dm.SLOT_COMMANDS[slot]} | set(dm.EXTRAS)
+    # get/set_aperture exist in dm_server but raise NotImplementedError, so the
+    # DM driver doesn't advertise them (routing by slot still reaches them).
+    missing = set(COMMANDS) - reachable - {"ping", "quit", "get_aperture", "set_aperture"}
+    assert not missing, f"add these to drivers/dm.py SLOT_COMMANDS or EXTRAS: {missing}"

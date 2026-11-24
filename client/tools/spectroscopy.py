@@ -8,11 +8,14 @@ from client.transport.zmq_client import ZMQClient
 from client.state.manager import StateManager
 
 
+_SI_KINDS = ("map", "line", "points", "time_series")
+
+
 def register(mcp: FastMCP, zmq: ZMQClient, state: StateManager) -> None:
 
     @mcp.tool()
     async def configure_si(
-        mode: str = "2D Array",
+        kind: str = "map",
         pixel_time_s: float | None = 0.05,
         signal: int = 1,
         # 2D Array
@@ -39,13 +42,13 @@ def register(mcp: FastMCP, zmq: ZMQClient, state: StateManager) -> None:
     ) -> dict:
         """Configure a spectrum-image (SI) acquisition for the chosen mode.
 
-        Grabs a fresh survey image (DSInvokeButton(3)), enters the SI mode
-        (which assigns the survey + default ROI), applies the requested
+        On Digital Micrograph this grabs a fresh survey image, enters the SI
+        mode (which assigns the survey + default ROI), applies the requested
         field values, and enables Scan + the chosen Signal channel. Does
-        not trigger Capture — call ``start_si`` for that.
+        not trigger Capture: call ``start_si`` for that.
 
         Args:
-            mode: One of "2D Array", "Line Scan", "Multi-Point", "Time Series".
+            kind: "map" (2D array), "line", "points" or "time_series".
             pixel_time_s: Per-pixel exposure (the "Pixel Time" palette field).
             signal: Signal channel to enable (1-5). Defaults to 1.
             x_samples, y_samples, sampling, sampling_lock: 2D Array fields.
@@ -56,7 +59,9 @@ def register(mcp: FastMCP, zmq: ZMQClient, state: StateManager) -> None:
             passes: Number of acquisition passes.
             drift: Toggle spatial drift correction.
         """
-        args: dict = {"mode": mode, "signal": signal}
+        if kind not in _SI_KINDS:
+            raise ValueError(f"kind must be one of {', '.join(_SI_KINDS)}, got {kind!r}")
+        args: dict = {"signal": signal, "kind": kind}
         if pixel_time_s is not None:
             args["pixel_time_s"] = pixel_time_s
         for name, val in [

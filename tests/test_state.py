@@ -49,7 +49,7 @@ def test_sample_metadata_round_trip():
 
 def test_operational_preferences_defaults():
     prefs = OperationalPreferences()
-    assert prefs.blank_between_acquisitions is True
+    assert prefs.blank_between_acquisitions is False     # opt-in since it is enforced
     assert prefs.capture_preset.width == 2048
 
 
@@ -121,3 +121,23 @@ def test_state_manager_map_objects(tmp_dir):
     assert retrieved is not None
     assert retrieved.examined is True
     assert retrieved.label == "particle_A"
+
+
+def test_state_save_is_atomic_and_keeps_a_backup(tmp_dir):
+    sm = StateManager(tmp_dir)
+    sm.set_sample(name="first")
+    sm.set_sample(name="second")
+    assert (tmp_dir / "amadeus_state.json.bak").exists()
+    assert not (tmp_dir / "amadeus_state.json.tmp").exists()
+
+
+def test_state_falls_back_to_backup_when_main_file_is_corrupt(tmp_dir):
+    # Old code wrote the file in place; a torn write (or any damage) made
+    # StateManager() raise and the whole session state was lost.
+    sm = StateManager(tmp_dir)
+    sm.set_sample(name="good")
+    sm.set_sample(name="newer")
+    (tmp_dir / "amadeus_state.json").write_text('{"sample": {"na', encoding="utf-8")
+    sm2 = StateManager(tmp_dir)
+    assert sm2.sample.name == "good"
+    assert sm2.loaded_from.name == "amadeus_state.json.bak"

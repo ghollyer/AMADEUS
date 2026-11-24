@@ -28,6 +28,8 @@ from pathlib import PureWindowsPath
 import numpy as np
 import DigitalMicrograph as DM
 
+from dm_server.helpers._dm_util import dm_text
+
 
 _DEFAULT_PATTERNS = ("*.dm3", "*.dm4")
 
@@ -116,7 +118,7 @@ def _collect_dim_calibrations(img) -> list[dict]:
             "size": int(img.GetDimensionSize(i)),
             "origin": float(origin),
             "scale": float(scale),
-            "units": str(units),
+            "units": dm_text(units),
         })
     return dims
 
@@ -158,12 +160,12 @@ def load_dm_file(params: dict):
 
     img = DM.OpenImage(path)
     try:
-        name = str(img.GetName() or PureWindowsPath(path).name)
+        name = dm_text(img.GetName() or PureWindowsPath(path).name)
         arr = np.array(img.GetNumArray())
         dims = _collect_dim_calibrations(img)
         intensity_scale = float(img.GetIntensityScale())
         intensity_origin = float(img.GetIntensityOrigin())
-        intensity_units = str(img.GetIntensityUnitString())
+        intensity_units = dm_text(img.GetIntensityUnitString())
     finally:
         if close_after:
             try:
@@ -202,3 +204,61 @@ def load_dm_file(params: dict):
         },
     }
     return meta, np.ascontiguousarray(arr)
+
+
+# Upper bound on one chunk, so a single request can't make DM allocate an
+# arbitrarily large buffer (the client asks for 32 MB by default).
+MAX_CHUNK_BYTES = 64 * 1024 * 1024
+
+
+def read_file_chunk(params: dict):
+    """Return raw bytes ``[offset, offset+length)`` of a file, verbatim.
+
+    Used to copy whole files (e.g. a .dm4 with its full tag tree) to the
+    control computer: the client loops over chunks until ``eof``. Every
+    reply re-reports the file's size and mtime so the client can detect a
+    file that changes mid-transfer, and carries the chunk's SHA-256 so each
+    chunk is verified end to end.
+
+    Parameters
+    ----------
+    params["path"] : str
+        Absolute path of a regular file on the DM machine.
+    params["offset"] : int, default 0
+    params["length"] : int, default MAX_CHUNK_BYTES (clamped to it)
+
+    Returns
+    -------
+    (dict, numpy.ndarray[uint8])
+        Standard image protocol; the 1-D uint8 array *is* the chunk.
+    """
+    import hashlib
+
+    path = params.get("path")
+    if not path:
+        raise ValueError("'path' parameter is required")
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"File not found: {path}")
+    offset = int(params.get("offset", 0))
+    length = int(params.get("length", MAX_CHUNK_BYTES))
+    if offset < 0 or length < 0:
+        raise ValueError("'offset' and 'length' must be non-negative")
+    length = min(length, MAX_CHUNK_BYTES)
+
+    st = os.stat(path)
+    with open(path, "rb") as fh:
+        fh.seek(offset)
+        chunk = fh.read(length)
+
+    meta = {
+        "path":       path,
+        "name":       PureWindowsPath(path).name,
+        "size_bytes": int(st.st_size),
+        "mtime":      float(st.st_mtime),
+        "offset":     offset,
+        "length":     len(chunk),
+        "eof":        offset + len(chunk) >= st.st_size,
+        "sha256":     hashlib.sha256(chunk).hexdigest(),
+        "image_meta": {"name": PureWindowsPath(path).name},
+    }
+    return meta, np.frombuffer(chunk, dtype=np.uint8)

@@ -67,6 +67,13 @@ class ImageStore:
             (self.root / f"{image_id}.json").read_text(encoding="utf-8")
         )
 
+    def exists(self, image_id: str) -> bool:
+        """True if *image_id* names a stored image (plain IDs only — no paths)."""
+        if not image_id or any(c in image_id for c in "/\\") or image_id.startswith("."):
+            return False
+        return (self.root / f"{image_id}.npy").is_file() and \
+            (self.root / f"{image_id}.json").is_file()
+
     def list_ids(self) -> list[str]:
         return [p.stem for p in sorted(self.root.glob("*.npy"))]
 

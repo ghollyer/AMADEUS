@@ -1,0 +1,32 @@
+\def\amadeusoverlay{%
+  % highlighted components
+  \foreach \n in {agent,req,state,router,hwb} {\node[hl, fit=(\n)] {};}
+  \node[hl, fit=(scope)] {};
+  % command: agent -> laptop -> relay -> microscope
+  \draw[flowreq] (agent.south) -- (agent |- mcp.north);
+  \draw[flowreq] (req.east) -- (router.west);
+  \draw[flowreq] (hwb.south) -- (hwb.south |- scope.north);
+  % reply: microscope -> relay
+  \draw[flowret] ([xshift=-5pt]hwb.south |- scope.north) -- ([xshift=-5pt]hwb.south);
+
+  % reply: relay -> laptop -> state -> agent
+  \draw[flowret] ([yshift=-5pt]router.west) -- ([yshift=-5pt]req.east);
+  \draw[flowret] ([yshift=-5pt]req.west) .. controls +(-0.32,0) and +(-0.32,0) .. (state.west);
+  \draw[flowret] ([xshift=-5pt]agent |- mcp.north) -- ([xshift=-5pt]agent.south);
+  % numbered steps
+  \node[badge] at (agent.north west) {1};
+  \node[badge] at (state.east) {3};
+  \node[badge] at ($(agent.south)!0.5!(agent |- mcp.north)+(0.4,0)$) {4};
+  \node[badge] at (scope.north west) {2};
+  % labels
+  \node[tag, anchor=south] at ([yshift=7pt]agent.north) {set\_focus};
+  \node[tag, anchor=north] at ([yshift=-3pt]mcp.south) {focus updated};
+  % step list
+  \flowbadge{1}{Agent calls \code{set\_focus}}
+  \flowreqline{REQ\too ROUTER (routing, policy)\too JEOL driver\too Microscope}
+  \flowbadge{2}{Microscope acts}
+  \flowretline{Microscope\too JEOL driver\too ROUTER\too REQ\too State}
+  \flowbadge{3}{\code{focus updated}}
+  \flowbadge{4}{Result returns to the agent}
+}
+\input{amadeus_diagram_core}
