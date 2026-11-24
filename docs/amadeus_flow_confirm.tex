@@ -1,0 +1,32 @@
+\def\amadeusoverlay{%
+  % highlighted components
+  \foreach \n in {agent,operator,req,router,hwb} {\node[hl, fit=(\n)] {};}
+  \node[hl, fit=(scope)] {};
+  % command: agent -> client -> relay (held by the policy layer)
+  \draw[flowreq] (agent.south) -- (agent |- mcp.north);
+  \draw[flowreq] (req.east) -- (router.west);
+  \draw[flowret] ([yshift=-5pt]router.west) -- ([yshift=-5pt]req.east);
+  % the client asks the operator, who allows it
+  \draw[flowret] ([xshift=5pt]operator |- mcp.north) -- ([xshift=5pt]operator.south);
+  \draw[flowreq] ([xshift=-5pt]operator.south) -- ([xshift=-5pt]operator |- mcp.north);
+  % resent with confirmed: relay -> JEOL driver -> microscope
+  \draw[flowreq] (hwb.south) -- (hwb.south |- scope.north);
+  % numbered steps
+  \node[badge] at (agent.north west) {1};
+  \node[badge] at (router.north east) {2};
+  \node[badge] at (operator.north east) {3};
+  \node[badge] at (scope.north west) {4};
+  % labels
+  \node[tag, anchor=south] at ([yshift=7pt]agent.north) {set\_column\_valves};
+  \node[tag] at ($(req.east)!0.5!(router.west)+(0,-0.5)$) {needs\_confirmation};
+  \node[tag, anchor=south] at ([yshift=7pt]operator.north) {Allow};
+  % step list
+  \flowbadge{1}{Agent calls \code{set\_column\_valves}}
+  \flowreqline{REQ\too ROUTER: \code{policy.confirm} holds it}
+  \flowbadge{2}{Relay replies \code{needs\_confirmation}}
+  \flowretline{ROUTER\too REQ: the agent can't confirm}
+  \flowbadge{3}{Operator chooses Allow (web, console or Claude Code)}
+  \flowreqline{REQ (\code{confirmed})\too ROUTER\too JEOL driver\too Microscope}
+  \flowbadge{4}{Valves open; the result returns to the agent}
+}
+\input{amadeus_diagram_core}

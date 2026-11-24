@@ -5,23 +5,58 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from client.state.manager import StateManager
+from client.analysis import ctf as _ctf
 from client.analysis import fft as _fft
 from client.analysis import segmentation as _seg
+from client.analysis import stage_mapping as _map
+from client.analysis.units import nm_per_px
 
 
-def register(mcp: FastMCP, state: StateManager) -> None:
+def register(mcp: FastMCP, state: StateManager, instrument: dict | None = None) -> None:
+    """*instrument* is the config's ``instrument`` section. Its
+    ``stage.image_mapping`` drives ``convert_pixel_to_stage``."""
 
     @mcp.tool()
-    async def compute_fft(image_id: str) -> dict:
-        """Compute the power spectrum (FFT) of a stored image.
+    async def compute_fft(
+        image_id: str,
+        fit_ctf: bool = False,
+        voltage_kv: float = 200.0,
+        cs_mm: float = 1.0,
+        q_min_inv_nm: float | None = None,
+        q_max_inv_nm: float | None = None,
+        defocus_max_nm: float = 5000.0,
+    ) -> dict:
+        """Compute the power spectrum (FFT) of a stored image, and optionally
+        fit defocus (C1) and twofold astigmatism (A1) to its Thon rings.
 
         The power spectrum is saved as a new image and its ID is returned.
 
+        The C1/A1 fit needs a spatially calibrated TEM image that includes
+        thin amorphous material (carbon film, an amorphous shell or edge);
+        crystalline-only areas and STEM images have no Thon rings, and give
+        reliable=false. Use a few hundred nm of defocus for clear rings.
+        To correct astigmatism, change one stigmator axis, refit, and watch
+        A1_nm fall; the angle tells you which direction to push.
+
         Args:
             image_id: ID of the source image (from take_stem_image or take_camera_image).
+            fit_ctf: Also fit C1 and A1 (default False).
+            voltage_kv: Accelerating voltage for the electron wavelength (F200: 200).
+            cs_mm: Spherical aberration of the objective (mm). Only affects the
+                defocus sign and high-q rings; check your pole piece.
+            q_min_inv_nm, q_max_inv_nm: Fit range in 1/nm (default from ~2 %
+                to 80 % of Nyquist, cut where the rings get too dense to resolve).
+            defocus_max_nm: Search defocus within +/- this.
 
         Returns:
-            power_spectrum_image_id, shape, and calibration of the FFT image.
+            power_spectrum_image_id and shape. With fit_ctf, also ``ctf``:
+            defocus_nm (positive = underfocus), C1_nm (= -defocus_nm,
+            aberration convention), A1_nm (half the defocus difference between
+            the principal axes), A1_angle_deg (most-underfocused axis, from
+            image +x toward +y, y down), score, significance, reliable,
+            sign_ambiguous (|CTF|^2 barely depends on the defocus sign; only Cs
+            breaks it, so trust |C1| and check the sign by stepping focus),
+            n_rings and the q range used.
         """
         arr, sidecar = state.images.load(image_id)
         ps = _fft.compute_power_spectrum(arr)
@@ -31,10 +66,22 @@ def register(mcp: FastMCP, state: StateManager) -> None:
             calibration=sidecar.calibration,
             tags={"source_image_id": image_id, "type": "power_spectrum"},
         )
-        return {
+        out = {
             "power_spectrum_image_id": ps_sidecar.image_id,
             "shape": ps_sidecar.shape,
         }
+        if fit_ctf:
+            cal = sidecar.calibration
+            nm_px = nm_per_px(cal.x_scale, cal.units)   # raises if uncalibrated
+            fit = _ctf.fit_ctf(arr, nm_px, voltage_kv=voltage_kv, cs_mm=cs_mm,
+                               q_min_inv_nm=q_min_inv_nm, q_max_inv_nm=q_max_inv_nm,
+                               defocus_max_nm=defocus_max_nm)
+            if not fit["reliable"]:
+                fit["warning"] = ("no clear Thon rings: the fit is not reliable. Image "
+                                  "thin amorphous material in TEM, with a few hundred "
+                                  "nm of defocus.")
+            out["ctf"] = {"nm_per_px": nm_px, **fit}
+        return out
 
     @mcp.tool()
     async def extract_lattice_spacings(
@@ -57,6 +104,8 @@ def register(mcp: FastMCP, state: StateManager) -> None:
             List of peaks with q (1/nm) and d-spacing (nm and Angstrom).
         """
         arr, sidecar = state.images.load(image_id)
+        cal = sidecar.calibration
+        nm_px = nm_per_px(cal.x_scale, cal.units)   # raises if uncalibrated
         ps = _fft.compute_power_spectrum(arr)
         peaks = _fft.find_diffraction_peaks(
             ps,
@@ -64,9 +113,9 @@ def register(mcp: FastMCP, state: StateManager) -> None:
             threshold_rel=threshold_rel,
             max_peaks=max_peaks,
         )
-        cal = sidecar.calibration.x_scale  # nm/px
-        spacings = _fft.extract_d_spacings(peaks, tuple(arr.shape[:2]), cal)
-        return {"image_id": image_id, "peaks": spacings}
+        spacings = _fft.extract_d_spacings(peaks, tuple(arr.shape[:2]), nm_px)
+        return {"image_id": image_id, "nm_per_px": nm_px,
+                "min_resolvable_d_nm": 2 * nm_px, "peaks": spacings}
 
     @mcp.tool()
     async def segment_image(
@@ -112,10 +161,18 @@ def register(mcp: FastMCP, state: StateManager) -> None:
     async def convert_pixel_to_stage(
         image_id: str, px: float, py: float
     ) -> dict:
-        """Convert pixel coordinates in an image to estimated stage coordinates.
+        """Stage position that puts pixel (px, py) of an image at the image centre.
 
-        Uses the image calibration and the stage position recorded at acquisition
-        time to estimate where on the specimen the pixel corresponds to.
+        Uses the stage position recorded when the image was acquired, the
+        image's spatial calibration, and the instrument's measured
+        stage->image Jacobian for the image's mode (STEM/TEM). The F200's
+        stage axes are rotated and scaled relative to the scan, so a plain
+        pixel offset would land the stage far off target. Without a measured
+        Jacobian it falls back to the plain offset and says so.
+
+        Accuracy is limited by stage backlash (~0.5 um on direction
+        reversals). For precise centring, move with approach=True, then
+        re-image and repeat with the new image.
 
         Args:
             image_id: ID of the image.
@@ -123,19 +180,10 @@ def register(mcp: FastMCP, state: StateManager) -> None:
             py: Pixel row (y).
 
         Returns:
-            Estimated stage position in metres (x_m, y_m).
+            x_m, y_m, z_m: target stage position in metres (pass x_m*1e9 /
+            y_m*1e9 as x_nm / y_nm to move_stage_absolute). Also: the move
+            (dx_m, dy_m), the mapping used, and any warnings.
         """
         _, sidecar = state.images.load(image_id)
-        if sidecar.stage_position is None:
-            raise ValueError("Image has no associated stage position.")
-        rows, cols = sidecar.shape[:2]
-        cal_x = sidecar.calibration.x_scale * 1e-9  # nm/px -> m/px
-        cal_y = sidecar.calibration.y_scale * 1e-9
-        dx_m = (px - cols / 2) * cal_x
-        dy_m = (py - rows / 2) * cal_y
-        stage = sidecar.stage_position
-        return {
-            "x_m": stage.x_m + dx_m,
-            "y_m": stage.y_m + dy_m,
-            "z_m": stage.z_m,
-        }
+        return _map.pixel_to_stage(sidecar, px, py, instrument)
+

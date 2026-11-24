@@ -1,0 +1,109 @@
+{
+  "version": 4,
+  "microscope_pc": {
+    "ip": "192.168.50.2",
+    "repo_path": "C:\\AMADEUS",
+    "vjem310_python": "C:\\Users\\USERNAME\\.conda\\envs\\vjem310\\python.exe",
+    "listen_ip": "*",
+    "adapter_alias": "Ethernet 2"
+  },
+  "control_pc": {
+    "ip": "192.168.50.1",
+    "data_dir": "amadeus_data/session"
+  },
+  "ports": {
+    "relay": 9875,
+    "dm": 9876,
+    "stream": 9877,
+    "dm_stream": 9879
+  },
+  "connection": {
+    "mode": "direct",
+    "ssh_local_ports": {
+      "relay": 29875,
+      "stream": 29877
+    }
+  },
+  "relay": {
+    "timeout_ms": 30000
+  },
+  "client": {
+    "timeout_s": 600,
+    "allow_scripting": true,
+    "web_port": 8765
+  },
+  "experimental": {
+    "firewall_autofix": false
+  },
+  "instrument": {
+    "label": "JEOL F200",
+    "roles": {
+      "detectors": {},
+      "cameras": {}
+    },
+    "stage_scale_to_m": 1e-09,
+    "deflectors": {
+      "beam_shift": "CLA1",
+      "beam_tilt": "CLA2"
+    },
+    "lenses": {
+      "focus.fine": "OLf",
+      "focus.coarse": "OLc"
+    },
+    "magnifications": {},
+    "focus": {
+      "by_mode": {
+        "TEM": {
+          "lens": "focus.fine",
+          "dac_per_nm": null,
+          "dac_at_zero": null
+        },
+        "STEM": {
+          "lens": "focus.fine",
+          "dac_per_nm": null,
+          "dac_at_zero": null
+        }
+      }
+    },
+    "stage": {
+      "motion": "auto",
+      "backlash": {
+        "enabled": false,
+        "overshoot_nm": 1000,
+        "approach": [
+          1,
+          1
+        ]
+      },
+      "piezo_range_nm": 10000,
+      "image_mapping": {}
+    }
+  },
+  "drivers": {
+    "hw": {
+      "kind": "jeol",
+      "offline": true,
+      "host": "in_process",
+      "slots": [
+        "column",
+        "stage"
+      ]
+    },
+    "dm": {
+      "kind": "dm",
+      "slots": [
+        "scan",
+        "camera",
+        "live",
+        "spectrometer",
+        "files"
+      ]
+    }
+  },
+  "exclusive": [],
+  "policy": {
+    "stage_limits": {},
+    "confirm": [],
+    "confirm_vendor_writes": true
+  }
+}

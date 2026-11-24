@@ -1,4 +1,9 @@
-"""DM helpers for microscope control.
+"""DM helpers for microscope control — the FALLBACK hardware path.
+
+Hardware control normally goes through a vendor driver (``drivers/``, JEOL on
+the F200); the relay routes these commands here only when the config gives
+the DM driver the ``column`` slot (the operator's fallback). Keep this module
+working, but add new hardware features to the drivers instead.
 
 Values are passed through persistent tags so the Python side can read results
 from script calls. Focus conversion uses a local raw-to-nm calibration because
@@ -58,6 +63,33 @@ def _focus_cal_for_mode(op_mode: str) -> dict:
             return v
     default = MICROSCOPE_CALIBRATION.get("default_mode", "IMAGING")
     return by_mode.get(default, next(iter(by_mode.values())))
+
+
+def _is_known_focus_mode(op_mode: str) -> bool:
+    """True when *op_mode* matches a calibrated mode key, rather than landing
+    on the ``default_mode`` fallback inside :func:`_focus_cal_for_mode`.
+
+    Used to guard absolute/relative focus writes: the per-mode raws differ by
+    ~50× (TEM imaging ~1.55 M vs STEM scanning ~33 k), so applying the wrong
+    mode's calibration would drive the lens far out of range.  An empty or
+    unrecognised mode (e.g. ``"DIFFRACTION"``, which has no calibration)
+    returns ``False`` here so callers can refuse the write instead of
+    silently using the IMAGING fallback."""
+    by_mode = MICROSCOPE_CALIBRATION.get("by_mode", {})
+    norm = (op_mode or "").strip().upper()
+    return any(norm.startswith(k.upper()) for k in by_mode)
+
+
+def _require_focus_mode(op_mode: str) -> None:
+    """Raise ``RuntimeError`` if *op_mode* has no real focus calibration."""
+    if not _is_known_focus_mode(op_mode):
+        known = sorted(MICROSCOPE_CALIBRATION.get("by_mode", {}))
+        raise RuntimeError(
+            f"Refusing to set focus: operation mode {op_mode!r} has no focus "
+            f"calibration (calibrated modes: {known}). Focus raws differ ~50x "
+            f"between modes, so applying the wrong calibration could drive the "
+            f"lens far out of range. Check EMGetOperationMode() / recalibrate."
+        )
 
 
 def _focus_raw_per_nm(op_mode: str) -> float:
@@ -137,6 +169,7 @@ def set_focus(params: dict) -> dict:
     permitted range" failure surfaces the actual raw value being sent.
     """
     opmode = _read_operation_mode()
+    _require_focus_mode(opmode)
     raw = _nm_to_raw(float(params["focus_nm"]), opmode)
     safe_exec_script(f"EMSetFocus({raw})")
     return {"focus_raw": raw, "operation_mode": opmode}
@@ -155,6 +188,7 @@ def change_focus(params: dict) -> dict:
     # Probe the operation mode first so the slope used for the delta
     # matches the lens system that's actually driving the column.
     opmode = _read_operation_mode()
+    _require_focus_mode(opmode)
     # Relative delta — only the slope applies; the raw-at-zero offset
     # cancels for a change and must not be added in.
     delta_raw = float(params["delta_nm"]) * _focus_raw_per_nm(opmode)
@@ -312,6 +346,7 @@ def get_microscope_state(params: dict) -> dict:
         number mag     = EMGetMagnification()
         number idx     = EMGetMagIndex()
         number f = EMGetFocus()
+        number spot    = EMGetSpotSize()
         number blanked = EMGetBeamBlanked()
         number valves  = EMGetColumnValvesOpen()
         number bsx, bsy, btx, bty, ox, oy, cx, cy
@@ -330,6 +365,7 @@ def get_microscope_state(params: dict) -> dict:
         TagGroupSetTagAsFloat(tg,  "__amadeus__:state:mag",     mag)
         TagGroupSetTagAsFloat(tg,  "__amadeus__:state:mag_idx", idx)
         TagGroupSetTagAsFloat(tg,  "__amadeus__:state:focus",   f)
+        TagGroupSetTagAsFloat(tg,  "__amadeus__:state:spot",    spot)
         TagGroupSetTagAsFloat(tg,  "__amadeus__:state:blanked", blanked)
         TagGroupSetTagAsFloat(tg,  "__amadeus__:state:valves",  valves)
         TagGroupSetTagAsFloat(tg,  "__amadeus__:state:bsx",     bsx)
@@ -348,6 +384,7 @@ def get_microscope_state(params: dict) -> dict:
         "magnification":      read_float("state:mag"),
         "mag_index":          int(read_float("state:mag_idx")),
         "focus_nm":           _raw_to_nm(read_float("state:focus"), opmode),
+        "spot_size":          int(read_float("state:spot")),
         "beam_blanked":       bool(read_float("state:blanked")),
         "column_valves_open": bool(read_float("state:valves")),
         "beam_shift":         {"x": read_float("state:bsx"), "y": read_float("state:bsy")},

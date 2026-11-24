@@ -31,9 +31,20 @@ logs/
 *.log
 amadeus_data/
 data/
+test-data/
 
 # Editor / OS
 .DS_Store
 *.swp
 .idea/
 .vscode/
+
+# Documentation and vendor material (case matters on Linux: the dir is Reference/)
+reference/
+Reference/
+# Per-deployment config written by the setup wizard (contains IPs/paths)
+amadeus_config.json
+
+# The operator workspace ships its Claude Code settings (but not local overrides)
+!operator/.claude/
+operator/.claude/settings.local.json

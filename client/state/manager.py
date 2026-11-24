@@ -7,6 +7,7 @@ On startup the manager reloads from disk if a state file exists.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from client.state.models import (
     MapObject,
     MicroscopeState,
     OperationalPreferences,
+    SessionTask,
     SampleMetadata,
     StagePosition,
 )
@@ -35,6 +37,7 @@ class StateManager:
         self.microscope = MicroscopeState()
         self.sample = SampleMetadata()
         self.plan = ExperimentalPlan()
+        self.task = SessionTask()
         self.preferences = OperationalPreferences()
         self.saved_locations: dict[str, StagePosition] = {}
         self.map_objects: dict[str, MapObject] = {}
@@ -45,14 +48,36 @@ class StateManager:
     # Persistence
     # ------------------------------------------------------------------
 
+    def _read_state_file(self) -> dict | None:
+        """The saved state, or the backup if the main file is unreadable.
+
+        ``save()`` writes atomically, so a torn file should not happen, but a
+        file damaged by other means (a disk error, a hand edit) must not lose
+        the whole session: fall back to the last good copy."""
+        backup = self._state_path.with_name(self._state_path.name + ".bak")
+        for path in (self._state_path, backup):
+            if not path.exists():
+                continue
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(raw, dict):
+                self.loaded_from = path
+                return raw
+        return None
+
     def _load(self) -> None:
-        if not self._state_path.exists():
+        self.loaded_from: Path | None = None
+        raw = self._read_state_file()
+        if raw is None:
             return
-        raw = json.loads(self._state_path.read_text(encoding="utf-8"))
         if "sample" in raw:
             self.sample = SampleMetadata.model_validate(raw["sample"])
         if "plan" in raw:
             self.plan = ExperimentalPlan.model_validate(raw["plan"])
+        if "task" in raw:
+            self.task = SessionTask.model_validate(raw["task"])
         if "preferences" in raw:
             self.preferences = OperationalPreferences.model_validate(raw["preferences"])
         if "saved_locations" in raw:
@@ -70,6 +95,7 @@ class StateManager:
         payload = {
             "sample": self.sample.model_dump(),
             "plan": self.plan.model_dump(),
+            "task": self.task.model_dump(),
             "preferences": self.preferences.model_dump(),
             "saved_locations": {
                 k: v.model_dump() for k, v in self.saved_locations.items()
@@ -78,9 +104,21 @@ class StateManager:
                 k: v.model_dump() for k, v in self.map_objects.items()
             },
         }
-        self._state_path.write_text(
-            json.dumps(payload, indent=2, default=str), encoding="utf-8"
-        )
+        # Atomic: write a temp file, keep the previous good file as .bak, then
+        # replace. A crash or full disk mid-write leaves the old state intact.
+        text = json.dumps(payload, indent=2, default=str)
+        tmp = self._state_path.with_name(self._state_path.name + ".tmp")
+        backup = self._state_path.with_name(self._state_path.name + ".bak")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        if self._state_path.exists():
+            try:
+                os.replace(self._state_path, backup)
+            except OSError:
+                pass
+        os.replace(tmp, self._state_path)
 
     # ------------------------------------------------------------------
     # Sample
@@ -99,6 +137,11 @@ class StateManager:
         self.plan = ExperimentalPlan(**{**self.plan.model_dump(), **kwargs})
         self.save()
         return self.plan
+
+    def set_task(self, **kwargs: Any) -> SessionTask:
+        self.task = SessionTask(**{**self.task.model_dump(), **kwargs})
+        self.save()
+        return self.task
 
     # ------------------------------------------------------------------
     # Preferences

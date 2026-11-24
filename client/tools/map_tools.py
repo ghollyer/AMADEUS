@@ -82,6 +82,11 @@ def register(mcp: FastMCP, state: StateManager) -> None:
         obj = state.get_map_object(object_id)
         if obj is None:
             raise ValueError(f"Map object {object_id!r} not found.")
+        if not state.images.exists(image_id):
+            raise ValueError(f"Image {image_id!r} not found in the local image store "
+                             "(see list_local_images).")
+        if image_id in obj.image_ids:
+            return obj.model_dump()
         updated_ids = obj.image_ids + [image_id]
         obj = state.update_map_object(object_id, image_ids=updated_ids)
         return obj.model_dump()

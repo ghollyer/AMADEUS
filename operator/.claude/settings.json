@@ -1,0 +1,30 @@
+{
+  "enabledMcpjsonServers": [
+    "amadeus"
+  ],
+  "permissions": {
+    "allow": [
+      "mcp__amadeus",
+      "mcp__amadeus-web",
+      "Read(../amadeus_data/**)"
+    ],
+    "deny": [
+      "mcp__amadeus__execute_dm_script",
+      "mcp__amadeus__execute_tem3_call",
+      "mcp__amadeus__execute_vendor_call",
+      "mcp__amadeus-web__execute_dm_script",
+      "mcp__amadeus-web__execute_tem3_call",
+      "mcp__amadeus-web__execute_vendor_call",
+      "Bash",
+      "Write",
+      "Edit",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch"
+    ],
+    "additionalDirectories": [
+      "../amadeus_data"
+    ],
+    "disableBypassPermissionsMode": "disable"
+  }
+}

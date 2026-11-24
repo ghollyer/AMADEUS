@@ -1,4 +1,8 @@
-"""DM helpers for stage control.
+"""DM helpers for stage control — the FALLBACK hardware path.
+
+Stage control normally goes through a vendor driver (``drivers/``, JEOL on the
+F200); the relay routes these commands here only when the config gives the
+DM driver the ``stage`` slot. Keep working; add new features to the drivers.
 
 Stage values are returned through persistent tags and converted to SI units on
 the Python side.

@@ -3,7 +3,7 @@
 import numpy as np
 import DigitalMicrograph as DM
 
-from dm_server.helpers._dm_util import exec_script, safe_exec_script, read_float, read_string
+from dm_server.helpers._dm_util import exec_script, safe_exec_script, read_float, read_string, dm_text
 
 _TG = "GetPersistentTagGroup()"
 
@@ -66,7 +66,7 @@ def stem_acquire(params: dict):
             "calibration": {
                 "x_scale": x_scale,
                 "y_scale": y_scale,
-                "units":   x_units,
+                "units":   dm_text(x_units),
             },
         },
     }
@@ -80,7 +80,7 @@ def get_stem_settings(params: dict) -> dict:
         number n = DSCountSignals()
         TagGroupSetTagAsFloat(tg, "__amadeus__:ds:n_signals", n)
         number active = 0
-        if (DSIsAcquisitionActive()) {{ active = 1 }}
+        if (DSIsAcquisitionActive()) {{ active = 1; }}
         TagGroupSetTagAsFloat(tg, "__amadeus__:ds:active", active)
         number i
         for (i = 0; i < n; i++) {{

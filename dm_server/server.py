@@ -34,12 +34,22 @@ from dm_server.helpers import stage as _stage
 from dm_server.helpers import spectroscopy as _si
 from dm_server.helpers import eds as _eds
 from dm_server.helpers import files as _files
+from dm_server.helpers import live as _live
+from dm_server.helpers import windows as _win
 
 PORT = 9876
+# Live-scan frames are published here, out-of-band, so the synchronous REQ/REP
+# command channel (PORT) is never blocked by a running scan. The relay
+# subscribes and republishes them for the laptop on its public stream port.
+STREAM_PORT = 9879
+# Only the relay (same PC) talks to the DM server, so it listens on loopback.
+# DigitalMicrograph therefore never needs an inbound firewall rule.
+BIND_IP = "127.0.0.1"
 
-# Handles to the running socket/context, exposed so shutdown_server() can be
+# Handles to the running sockets/context, exposed so shutdown_server() can be
 # invoked from the DM Python console after run_server() returns.
 _active_socket: "zmq.Socket | None" = None
+_active_pub: "zmq.Socket | None" = None
 _active_context: "zmq.Context | None" = None
 
 # ---------------------------------------------------------------------------
@@ -80,6 +90,12 @@ COMMANDS = {
     "move_beam_to":          (_ds.move_beam_to,           False),
     "get_beam_position":     (_ds.get_beam_position,      False),
 
+    # Live scan (frames stream out-of-band on the PUB socket; these are control
+    # commands only and return plain JSON status).
+    "live_start":            (_live.live_start,           False),
+    "live_stop":             (_live.live_stop,            False),
+    "live_status":           (_live.live_status,          False),
+
     # Camera (TEM mode)
     "camera_acquire":        (_cam.camera_acquire,        True),
     "get_camera_info":       (_cam.get_camera_info,       False),
@@ -102,6 +118,13 @@ COMMANDS = {
     # Files on the microscope computer (browse + pull .dm3/.dm4)
     "list_dm_files":         (_files.list_files,           False),
     "load_dm_file":          (_files.load_dm_file,         True),
+    "read_file_chunk":       (_files.read_file_chunk,      True),
+
+    # DM document windows (image + script windows, all workspaces)
+    "list_windows":          (_win.list_windows,           False),
+    "select_window":         (_win.select_window,          False),
+    "close_window":          (_win.close_window,           False),
+    "save_window":           (_win.save_window,            False),
 }
 
 
@@ -133,7 +156,12 @@ def shutdown_server() -> None:
     block when a ``quit``/``shutdown`` command arrives, but also safe to call
     by hand from the DM Python console if the loop ever exits abnormally.
     """
-    global _active_socket, _active_context
+    global _active_socket, _active_pub, _active_context
+    # Stop any running live scan so we don't leave the column scanning.
+    try:
+        _live.live_stop({})
+    except Exception:
+        pass
     if _active_socket is not None:
         try:
             _active_socket.setsockopt(zmq.LINGER, 0)
@@ -141,6 +169,13 @@ def shutdown_server() -> None:
         except zmq.ZMQError:
             pass
         _active_socket = None
+    if _active_pub is not None:
+        try:
+            _active_pub.setsockopt(zmq.LINGER, 0)
+            _active_pub.close()
+        except zmq.ZMQError:
+            pass
+        _active_pub = None
     if _active_context is not None:
         try:
             _active_context.term()
@@ -211,37 +246,93 @@ def _dispatch(sock: zmq.Socket, request: dict) -> None:
         })
 
 
-def run_server(port: int = PORT) -> None:
-    """Start the blocking ZMQ REP loop. Send the cmd 'quit' or 'shutdown' to stop."""
-    global _active_socket, _active_context
+def _publish_live_frame(pub: zmq.Socket) -> None:
+    """Grab one live frame (if any) and publish it on the PUB socket.
+
+    Sent as a 3-part message — topic, JSON meta, raw C-contiguous bytes —
+    mirroring the REQ/REP image protocol so the client decodes it the same way.
+    Any error is swallowed so a transient DM hiccup never breaks the loop.
+    """
+    try:
+        frame = _live.grab_frame()
+        if frame is None:
+            return
+        data, arr = frame
+        meta = {
+            "status": "ok",
+            "image_meta": {
+                "shape": list(arr.shape),
+                "dtype": str(arr.dtype),
+                **data.get("image_meta", {}),
+            },
+            "data": {k: v for k, v in data.items() if k != "image_meta"},
+        }
+        pub.send(b"frame", flags=zmq.SNDMORE)
+        pub.send_json(meta, flags=zmq.SNDMORE)
+        pub.send(np.ascontiguousarray(arr).tobytes())
+    except Exception as exc:
+        print(f"[dm_server] live publish error: {exc}")
+
+
+def run_server(port: int = PORT, stream_port: int = STREAM_PORT,
+               bind_ip: str = BIND_IP) -> None:
+    """Start the ZMQ REP loop. Send the cmd 'quit' or 'shutdown' to stop.
+
+    *bind_ip* is the interface to listen on (default 127.0.0.1; "*" = all).
+    The launcher ``scripts/start_amadeus_dm.py`` fills the ports from
+    ``amadeus_config.json``.
+
+    The loop is a cooperative single-threaded poller: it waits up to the live
+    cadence for a command, dispatches it, then — if a live scan is running —
+    publishes one frame on the PUB socket. This keeps every DM call on the one
+    DM thread while still streaming frames between commands.
+    """
+    global _active_socket, _active_pub, _active_context
     context = zmq.Context()
     sock = context.socket(zmq.REP)
     # Bounded linger ensures the shutdown ack flushes to the client without
     # the close hanging forever if the peer disappeared.
     sock.setsockopt(zmq.LINGER, 1000)
-    sock.bind(f"tcp://*:{port}")
+    sock.bind(f"tcp://{bind_ip}:{port}")
+
+    pub = context.socket(zmq.PUB)
+    # Small send buffer: under load the newest frame wins, stale frames drop —
+    # exactly what a live preview wants.
+    pub.setsockopt(zmq.SNDHWM, 4)
+    pub.setsockopt(zmq.LINGER, 0)
+    pub.bind(f"tcp://{bind_ip}:{stream_port}")
+
     _active_context = context
     _active_socket = sock
-    print(f"[dm_server] Listening on tcp://*:{port}")
+    _active_pub = pub
+    print(f"[dm_server] Listening on tcp://{bind_ip}:{port}  (live stream tcp://{bind_ip}:{stream_port})")
+
+    poller = zmq.Poller()
+    poller.register(sock, zmq.POLLIN)
 
     try:
         while True:
-            raw = sock.recv()
-            try:
-                request = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                sock.send_json({"status": "error", "error": f"JSON parse error: {exc}"})
-                continue
+            events = dict(poller.poll(_live.poll_interval_ms()))
+            if sock in events:
+                raw = sock.recv()
+                try:
+                    request = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    sock.send_json({"status": "error", "error": f"JSON parse error: {exc}"})
+                    request = None
 
-            if request.get("cmd") in ("quit", "shutdown"):
-                sock.send_json({
-                    "status": "ok",
-                    "data": {"message": "Server shutting down; helpers will be unloaded"},
-                    "request_id": request.get("request_id", ""),
-                })
-                break
+                if request is not None:
+                    if request.get("cmd") in ("quit", "shutdown"):
+                        sock.send_json({
+                            "status": "ok",
+                            "data": {"message": "Server shutting down; helpers will be unloaded"},
+                            "request_id": request.get("request_id", ""),
+                        })
+                        break
+                    _dispatch(sock, request)
 
-            _dispatch(sock, request)
+            if _live.is_active():
+                _publish_live_frame(pub)
     finally:
         shutdown_server()
 
